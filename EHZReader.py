@@ -27,6 +27,27 @@ reg2_8_0 = re.compile(r'77070100020800ff.*?.52(.{2})..(.{16})01')
 start = '1b1b1b1b01010101'
 end = '1b1b1b1b1a'
 
+loxone_ip = "192.168.188.33"
+loxone_user = "fhem"
+loxone_password = "fhem"
+loxone_url = F"http://{loxone_user}:{loxone_password}@{loxone_ip}/dev/sps/io/"
+
+power_generated = 'power_generated'
+total_energy_generated = 'total_energy_generated'
+power_requested_from_net = 'power_requested_from_net'
+total_energy_requested_from_net = 'total_energy_requested_from_net'
+total_energy_1_requested_from_net = 'total_energy_1_requested_from_net'
+total_energy_2_requested_from_net = 'total_energy_2_requested_from_net'
+total_energy_delivered_to_net = 'total_energy_delivered_to_net'
+
+portmap = {
+  power_requested_from_net: 'VI4',
+  total_energy_requested_from_net: 'VI5',
+  total_energy_delivered_to_net: 'VI6',
+  total_energy_generated: 'VI9',
+  power_generated: 'VI10'
+}
+
 def init_usb():
     """Initialize serial port"""
     usb = serial.Serial()
@@ -38,8 +59,8 @@ def init_usb():
     usb.bytesize = serial.EIGHTBITS
     return usb
 
-def sendToLoxone(url):
-    call(["curl", "http://fhem:fhem@192.168.188.33/dev/sps/io/" + url])
+def sendToLoxone(virtual_port):
+    call(["curl", loxone_url + virtual_port])
 
 def convertToFloat(match):
     scale = 1000.0
@@ -59,34 +80,29 @@ def main():
     port = init_usb()
     while True:
         try:
+            p = {}
             if port.isOpen():
-                p = read_next_package(port)
-                print(json.dumps(p))
-                
-                if 'power' in p:
-                    sendToLoxone("VI4/{0}".format(p['power']))
-                if 'totalconsumed' in p:
-                    sendToLoxone("VI5/{0}".format(p['totalconsumed']))
-                if 'totalproduced' in p:
-                    sendToLoxone("VI6/{0}".format(p['totalproduced']))
-
-                l = read_fronius()
-                print(json.dumps(l))
-        
-                if 'power' in l:
-                    sendToLoxone("VI10/{0}".format(l['power']))
-                if 'totalproduced' in l:
-                    sendToLoxone("VI9/{0}".format(l['totalproduced']))
+                read_next_package(port, p)
             else:
                 print("Wait for device to connect...")
-                time.sleep(10)
+                time.sleep(1)
                 port.open()
+
+            read_fronius(p)
+
+            #print(json.dumps(p))
+
+            for value_type, virtual_port in portmap.items():
+                if value_type in p:
+                    sendToLoxone(F"{virtual_port}/{p[value_type]}")
+
+            time.sleep(5)
 
         except serial.SerialException:
             print("USB error - retry...")
             time.sleep(10)
 
-def read_next_package(port):
+def read_next_package(port, j_data):
     data = ''
     while True:
         waitCount = 0
@@ -106,43 +122,43 @@ def read_next_package(port):
         if pos != -1:
             #print(data + '\n')
 
-            p = {}
-            p['timestamp'] = time.strftime("%Y-%m-%d ") + time.strftime("%H:%M:%S")
+            j_data['timestamp'] = time.strftime("%Y-%m-%d ") + time.strftime("%H:%M:%S")
 
             it = reg1_8_0.finditer(data)
             for m in it:
-                p['totalconsumed'] = convertToFloat(m)
+                j_data[total_energy_requested_from_net] = convertToFloat(m)
 
             it = reg1_8_1.finditer(data)
             for m in it:
-                p['consumed1'] = convertToFloat(m)
+                j_data[total_energy_1_requested_from_net] = convertToFloat(m)
 
             it = reg1_8_2.finditer(data)
             for m in it:
-                p['consumed2'] = convertToFloat(m)
+                j_data[total_energy_2_requested_from_net] = convertToFloat(m)
 
             it = reg2_8_0.finditer(data)
             for m in it:
-                p['totalproduced'] = convertToFloat(m)
+                j_data[total_energy_delivered_to_net] = convertToFloat(m)
 
             it = reg15_7_0.finditer(data)
             for m in it:
-                p['power'] = convertToFloat(m)
+                j_data[power_requested_from_net] = convertToFloat(m)
 
             data = ''
+            return
 
-            return p
-
-def read_fronius():
-    p = {}
+def read_fronius(j_data):
     try:
-        response = requests.get("http://192.168.188.24//solar_api/v1/GetInverterRealtimeData.cgi?Scope=Device&DeviceId=1&DataCollection=CommonInverterData")
+        to = 3 # three seconds timeout - fronius sleeps at night
+        
+        response = requests.get("http://192.168.188.24//solar_api/v1/GetInverterRealtimeData.cgi?Scope=Device&DeviceId=1&DataCollection=CommonInverterData", timeout=to)
+        response.raise_for_status() # raise exception if status code != 200
+        
         data = response.json()
-        p['power'] = data['Body']['Data']['PAC']['Value'] / 1000.0
-        p['totalproduced'] = data['Body']['Data']['TOTAL_ENERGY']['Value'] / 1000.0 
+        j_data[power_generated] = data['Body']['Data']['PAC']['Value'] / 1000.0
+        j_data[total_energy_generated] = data['Body']['Data']['TOTAL_ENERGY']['Value'] / 1000.0 
     except:
         pass
-    return p
 
 if __name__ == "__main__":
     main()
